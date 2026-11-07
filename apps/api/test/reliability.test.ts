@@ -134,6 +134,34 @@ describe('user misbehaves', () => {
   });
 });
 
+describe('per-guest limit (optional extension, enforced by a unique index)', () => {
+  it('one active booking per email per event type, case-insensitive', async () => {
+    const a = await hold(await tomorrowAt(env.db, '10:00'));
+    expect((await confirm(a.body.holdId, 'asha@example.com')).status).toBe(200);
+    const b = await hold(await tomorrowAt(env.db, '12:00'));
+    const second = await confirm(b.body.holdId, 'ASHA@example.com');
+    expect(second.status).toBe(409);
+    expect(second.body.error.code).toBe('GUEST_LIMIT');
+    // A different event type is fine.
+    const ws = await hold(await tomorrowAt(env.db, '14:00'), 'workshop');
+    expect((await confirm(ws.body.holdId, 'asha@example.com')).status).toBe(200);
+  });
+
+  it('two concurrent confirms for the same email: exactly one commits', async () => {
+    const holds = await Promise.all(['10:00', '12:00', '14:00', '15:00'].map(async (t) => hold(await tomorrowAt(env.db, t))));
+    const results = await Promise.all(holds.map((h) => confirm(h.body.holdId, 'race@example.com')));
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.status === 409)).toHaveLength(3);
+  });
+
+  it('cancelling frees the guest to book again', async () => {
+    const a = await confirm((await hold(await tomorrowAt(env.db, '10:00'))).body.holdId, 'g@example.com');
+    await post(env.baseUrl, `/api/bookings/${a.body.manageToken}/cancel`, {});
+    const b = await hold(await tomorrowAt(env.db, '12:00'));
+    expect((await confirm(b.body.holdId, 'g@example.com')).status).toBe(200);
+  });
+});
+
 describe('reschedule', () => {
   it('moves a booking in place, even into a range overlapping its own old slot', async () => {
     const h = await hold(await tomorrowAt(env.db, '10:00'));

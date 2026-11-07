@@ -14,6 +14,8 @@ export const errors = {
   slotFull: () => new ApiError(409, 'SLOT_FULL', 'This session is full'),
   slotInvalid: (why: string) => new ApiError(422, 'SLOT_INVALID', why),
   holdExpired: () => new ApiError(410, 'HOLD_EXPIRED', 'Your hold expired; please pick the slot again'),
+  guestLimit: () =>
+    new ApiError(409, 'GUEST_LIMIT', 'You already have an upcoming booking for this event; reschedule it instead'),
   bookingNotActive: () => new ApiError(409, 'BOOKING_NOT_ACTIVE', 'This booking is cancelled'),
   idempotencyMismatch: () =>
     new ApiError(422, 'IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key was already used with a different request'),

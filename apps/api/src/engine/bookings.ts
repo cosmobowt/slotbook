@@ -252,13 +252,22 @@ export async function confirmHold(db: Db, holdId: string, guest: { name: string;
   return withTxRetry(db, async (tx) => {
     // One atomic statement: succeeds only if the hold is still alive *by the database clock*.
     const token = randomBytes(24).toString('base64url');
-    const { rows } = await tx.query<BookingRow>(
-      `UPDATE bookings
-       SET status = 'confirmed', guest_name = $2, guest_email = $3, manage_token = $4, confirmed_at = now()
-       WHERE id = $1 AND status = 'held' AND hold_expires_at > now()
-       RETURNING *`,
-      [holdId, guest.name, guest.email, token],
-    );
+    let rows: BookingRow[];
+    try {
+      ({ rows } = await tx.query<BookingRow>(
+        `UPDATE bookings
+         SET status = 'confirmed', guest_name = $2, guest_email = $3, manage_token = $4, confirmed_at = now()
+         WHERE id = $1 AND status = 'held' AND hold_expires_at > now()
+         RETURNING *`,
+        [holdId, guest.name, guest.email, token],
+      ));
+    } catch (err) {
+      // Per-guest limit (migration 002): the unique index rejects a second active booking for this email.
+      if (pgCode(err) === PG.UNIQUE_VIOLATION && (err as { constraint?: string }).constraint === 'one_active_booking_per_guest') {
+        throw errors.guestLimit();
+      }
+      throw err;
+    }
     if (rows[0]) {
       const view = await bookingView(tx, rows[0]);
       await notify(tx, rows[0].id, 'booking.confirmed', { ...view, manageToken: undefined });
