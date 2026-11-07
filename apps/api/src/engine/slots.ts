@@ -53,8 +53,9 @@ export function isValidZone(zone: string): boolean {
  * Convert a host wall-clock time on a host calendar date to an instant.
  * Nonexistent times (spring-forward gap) are moved forward to the first valid
  * instant — a window "02:30–05:00" on gap day starts at 03:00 local. Ambiguous
- * times (fall-back overlap) resolve to the earlier occurrence (Luxon's behaviour,
- * asserted in test/dst.test.ts so a library change cannot silently move slots).
+ * times (fall-back overlap) resolve to the EARLIER occurrence, like RFC 5545 (iCalendar).
+ * That is an explicit choice: Luxon's own default picks the later one, which the
+ * test in test/dst.test.ts caught. The policy is pinned by that test.
  */
 export function wallClockToInstant(date: string, time: string, zone: string): DateTime {
   const hhmm = time.slice(0, 5);
@@ -68,6 +69,9 @@ export function wallClockToInstant(date: string, time: string, zone: string): Da
     while (probe > before && probe.toFormat('HH:mm') >= hhmm) probe = probe.minus({ minutes: 1 });
     return probe.plus({ minutes: 1 });
   }
+  // Fall-back overlap: the same wall time exists twice. Take the earlier instant.
+  const options = dt.getPossibleOffsets();
+  if (options.length > 1) return options.reduce((a, b) => (a.toMillis() <= b.toMillis() ? a : b));
   return dt;
 }
 
