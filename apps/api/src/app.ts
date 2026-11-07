@@ -6,12 +6,19 @@ import fastifyStatic from '@fastify/static';
 import type { Db } from './db.js';
 import { ApiError } from './lib/errors.js';
 import { hostRoutes } from './routes/host.js';
+import { opsRoutes } from './routes/ops.js';
 import { publicRoutes } from './routes/public.js';
 
 export function buildApp(db: Db, opts: { logger?: boolean } = {}): FastifyInstance {
   const app = Fastify({
     logger: opts.logger ?? false,
+    // Request IDs: accept a caller's X-Request-Id (so one ID follows a request across services),
+    // otherwise generate one. Every log line for the request carries it as reqId.
+    requestIdHeader: 'x-request-id',
     genReqId: () => crypto.randomUUID(),
+  });
+  app.addHook('onSend', async (req, reply) => {
+    reply.header('x-request-id', req.id);
   });
 
   app.setErrorHandler((err, req, reply) => {
@@ -26,11 +33,7 @@ export function buildApp(db: Db, opts: { logger?: boolean } = {}): FastifyInstan
     return reply.code(500).send({ error: { code: 'INTERNAL', message: 'Something went wrong' } });
   });
 
-  app.get('/health', async () => {
-    const { rows } = await db.query('SELECT now() AS db_time');
-    return { ok: true, dbTime: rows[0].db_time };
-  });
-
+  opsRoutes(app, db);
   publicRoutes(app, db);
   hostRoutes(app, db);
 
