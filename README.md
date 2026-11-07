@@ -35,8 +35,11 @@ All tests run against real Postgres (`slotbook_test` database, created by `docke
 | File | What it proves |
 |---|---|
 | `test/concurrency.test.ts` | 50 simultaneous holds over real HTTP: exactly 1 wins a one-on-one slot, exactly 3 win a capacity-3 session; 60 holds racing across a call and a workshop of the same host never produce an overlap. Each test re-checks the invariant directly in SQL. |
-| `test/reliability.test.ts` | Idempotency-Key replay (sequential and 20 concurrent), key reuse rejected, idempotent confirm/cancel, hold expiry judged by the DB clock with the sweeper off, app clock skewed ±1 day changes nothing, buffers and off-grid times refused, reschedule in place. |
+| `test/reliability.test.ts` | Idempotency-Key replay (sequential and 20 concurrent), key reuse rejected, idempotent confirm/cancel, hold expiry judged by the DB clock with the sweeper off, app clock skewed ±1 day changes nothing, buffers and off-grid times refused, reschedule in place, per-guest limit (including 4 concurrent confirms for one email -> exactly 1). |
 | `test/dst.test.ts` | Slot generation across the US DST change on 1 Nov 2026, the spring-forward gap, the fall-back overlap, date overrides, notice and horizon from the DB clock. |
+| `test/observability.test.ts` | `/health`, request IDs, `/metrics` values, and the notification dispatcher delivering in order to a local webhook receiver, retrying after a failure. |
+
+CI: `.github/workflows/ci.yml` runs the build and all tests against a Postgres 16 service on every push.
 
 ## How double-booking is prevented
 
@@ -48,7 +51,7 @@ The application never decides whether a slot is free; Postgres does.
 2. **Seat counting** for group sessions: each hold upserts and locks the `slot_sessions` row with `SELECT … FOR UPDATE`, counts active seats, then inserts. Without that lock, the capacity-3 test sold 6–11 seats in experiments; with it, exactly 3 every run.
 3. **One clock.** Hold expiry is `now() + 5 min` and is checked as `hold_expires_at > now()` in SQL. Slot generation, minimum notice and horizon also use `SELECT now()`. The app server's and browser's clocks are never trusted. Because a constraint's `WHERE` cannot reference `now()`, each hold transaction first expires stale holds that overlap its range; a 30 s sweeper is housekeeping only.
 4. **Idempotency.** `POST /api/holds` takes `Idempotency-Key`. The key is claimed in the same transaction as the hold (`INSERT … ON CONFLICT DO NOTHING`), so key and hold commit together or not at all; duplicates replay the stored response with `Idempotent-Replayed: true`; reusing a key for a different request is a 422. Confirm, cancel and reschedule are naturally idempotent.
-5. **Outbox notifications.** `booking.confirmed / rescheduled / cancelled` rows are written in the same transaction as the change, so an event exists if and only if the change committed.
+5. **Outbox notifications.** `booking.confirmed / rescheduled / cancelled` rows are written in the same transaction as the change, so an event exists if and only if the change committed. A dispatcher (every 2 s) claims undelivered rows with `FOR UPDATE SKIP LOCKED` and posts them to `NOTIFY_WEBHOOK_URL` (or logs them when unset). Delivery is at-least-once and in order; receivers deduplicate on the notification id, sent as `idempotency-key`.
 6. Deadlocks between two holds on overlapping sessions are possible by design of the locking; Postgres aborts one and `withTxRetry` reruns it, so the loser gets a clean 409.
 
 ## Time zones
@@ -78,7 +81,12 @@ All bodies are JSON. Errors are `{ "error": { "code", "message" } }`.
 | GET | `/api/host/bookings` | Upcoming confirmed bookings |
 | POST | `/api/host/bookings/{id}/cancel` | `{ reason }` |
 | GET | `/api/host/notifications` | The notifications sink |
-| GET | `/health` | Includes the database time |
+| GET | `/health` | Includes the database time; 503 if the database is unreachable |
+| GET | `/metrics` | Prometheus text: bookings by status (incl. expired holds), pending notifications, notification lag, HTTP responses by class |
+
+Every response carries `X-Request-Id` (a caller-supplied one is kept) and every log line for that request includes it.
+
+Environment: `DATABASE_URL` (required), `PORT` (3000), `HOLD_TTL_SECONDS` (300), `NOTIFY_WEBHOOK_URL` (optional), `SEED` (`false` to skip the demo seed).
 
 ## 60-second tour
 
@@ -103,11 +111,16 @@ apps/web/src/                      React UI
 
 ## Optional extensions
 
-None of the listed extensions is fully built. Time went into the reliability core and the tests that prove it. Partial: `/health` (reports DB time) and per-request IDs in Fastify's structured logs.
+Built on top of the reliability core, each keeping every core guarantee true:
+
+- **Per-guest limit** (half of "Daily cap and per-guest limit"): one active confirmed booking per email per event type, case-insensitive. Enforced by a partial unique index (`migrations/002_guest_limit.sql`), the same way double-booking is: the database decides, so concurrent confirms cannot both commit. Holds carry no email, so the limit applies at confirm. The daily cap is not built.
+- **Observability:** structured JSON logs with request IDs, `/health`, `/metrics` (bookings, hold expiries, notification lag), and the outbox dispatcher that makes notification lag meaningful.
+- **CI** (half of "End-to-end tests and CI"): GitHub Actions runs build and all tests against real Postgres on every push. Playwright end-to-end tests are not built.
 
 ## Known gaps
 
-- Notifications are recorded in the sink table; there is no dispatcher posting them to a webhook yet (`delivered_at` is reserved for it).
+- Notification webhooks are unsigned and have no per-host registration or delivery log UI (that is the "Host webhooks" extension).
+- Daily cap per host and Playwright end-to-end tests are not built.
 - No rate limiting or bot protection on public endpoints: one client can hold many slots for 5 minutes each.
 - Host auth is a seeded username/password with bearer tokens in localStorage; fine for a demo, not for production.
 - Changing a host's time zone or availability does not touch existing bookings (they are absolute instants, by design).
